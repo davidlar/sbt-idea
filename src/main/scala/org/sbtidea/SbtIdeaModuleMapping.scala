@@ -3,6 +3,8 @@ package org.sbtidea
 import sbt._
 
 object SbtIdeaModuleMapping {
+  type SourcesClassifier = String
+  type JavadocClassifier = String
 
   def toIdeaLib(instance: ScalaInstance) = {
     IdeaLibrary("scala-" + instance.version, List(instance.libraryJar, instance.compilerJar),
@@ -20,7 +22,7 @@ object SbtIdeaModuleMapping {
    *   * `unmanagedClasspath`
    */
   final class LibrariesExtractor(buildStruct: Load.BuildStructure, state: State, projectRef: ProjectRef, logger: Logger,
-                                 scalaInstance: ScalaInstance, withClassifiers: Boolean) {
+                                 scalaInstance: ScalaInstance, withClassifiers: Option[(Seq[SourcesClassifier], Seq[JavadocClassifier])]) {
 
     def allLibraries: Seq[IdeaModuleLibRef] = managedLibraries ++ unmanagedLibraries
 
@@ -40,12 +42,12 @@ object SbtIdeaModuleMapping {
         case Some(Value(report)) =>
           val libraries: Seq[(IdeaModuleLibRef, ModuleID)] = convertDeps(report, deps, scalaInstance.version)
 
-          if (withClassifiers) {
+          withClassifiers.map { classifiers =>
             evaluateTask(Keys.updateClassifiers) match {
-              case Some(Value(report)) => addClassifiers(libraries, report)
+              case Some(Value(report)) => addClassifiers(libraries, report, classifiers)
               case _ => libraries
             }
-          } else libraries
+          }.getOrElse(libraries)
 
         case _ => Seq.empty
       }
@@ -99,15 +101,19 @@ object SbtIdeaModuleMapping {
     m1.organization == m2.organization && name(m1) == name(m2)
   }
 
-  private def ideaLibFromModule(moduleReport: ModuleReport): IdeaLibrary = {
+  private def ideaLibFromModule(moduleReport: ModuleReport, classifiers: Option[(Seq[SourcesClassifier], Seq[JavadocClassifier])] = None): IdeaLibrary = {
     val module = moduleReport.module
     def findByClassifier(classifier: Option[String]) = moduleReport.artifacts.collect {
       case (artifact, file) if (artifact.classifier == classifier) => file
     }
+    def findByClassifiers(classifiers: Option[Seq[String]]): Seq[File] = classifiers match {
+      case Some(classifiers) => classifiers.foldLeft(Seq[File]()) { (acc, classifier) => acc ++ findByClassifier(Some(classifier)) }
+      case None => Seq[File]()
+    }
     IdeaLibrary(module.organization + "_" + module.name + "_" + module.revision,
       classes = findByClassifier(None),
-      javaDocs = findByClassifier(Some("javadoc")),
-      sources = findByClassifier(Some("sources")))
+      sources = findByClassifiers(classifiers.map(_._1)),
+      javaDocs = findByClassifiers(classifiers.map(_._2)))
   }
 
   private def toScope(conf: String) = {
@@ -153,48 +159,27 @@ object SbtIdeaModuleMapping {
   }
 
   private def addClassifiers(ideaModuleLibRefs: Seq[(IdeaModuleLibRef, ModuleID)],
-                             report: UpdateReport): Seq[(IdeaModuleLibRef, ModuleID)] = {
+                             report: UpdateReport, classifiers: (Seq[SourcesClassifier], Seq[JavadocClassifier])): Seq[(IdeaModuleLibRef, ModuleID)] = {
 
     /* Both retrieved from UpdateTask, so we don't need to deal with crossVersion here */
     def equivModule(m1: ModuleID, m2: ModuleID): Boolean =
       m1.name == m2.name && m1.organization == m2.organization && m1.revision == m2.revision
 
-    val modifiedModuleLibRefs = {
-
-      report.configurations.flatMap {
-        configReport =>
-
-          configReport.modules.flatMap {
-            moduleReport =>
-
-              ideaModuleLibRefs.find {
-                case (moduleLibRef, moduleId) =>
-                  (moduleLibRef.config == toScope(configReport.configuration) || configReport.configuration == "default") && equivModule(moduleReport.module, moduleId)
-              } map {
-                case (moduleLibRef, moduleId) =>
-
-                  val ideaLibrary = {
-                    val il = ideaLibFromModule(moduleReport)
-                    il.copy(classes = il.classes ++ moduleLibRef.library.classes,
-                      javaDocs = il.javaDocs ++ moduleLibRef.library.javaDocs,
-                      sources = il.sources ++ moduleLibRef.library.sources)
-                  }
-
-                  moduleLibRef.copy(library = ideaLibrary) -> moduleId
-              }
-          }
-      }
-    }
-
-    val unmodifiedModuleLibRefs = ideaModuleLibRefs.filterNot {
-      case (_, m1) =>
-        modifiedModuleLibRefs.exists {
-          case (_, m2) => equivModule(m1, m2)
+    ideaModuleLibRefs.map { case (moduleLibRef, moduleId) =>
+      val configsAndModules = report.configurations.flatMap(configReport => configReport.modules.map(configReport.configuration -> _))
+      configsAndModules.find { case (configuration, moduleReport) =>
+        moduleLibRef.config == toScope(configuration) && equivModule(moduleReport.module, moduleId)
+      } map { case (_, moduleReport) =>
+        val ideaLibrary = {
+          val il = ideaLibFromModule(moduleReport, Some(classifiers))
+          il.copy(classes = il.classes ++ moduleLibRef.library.classes,
+            javaDocs = il.javaDocs ++ moduleLibRef.library.javaDocs,
+            sources = il.sources ++ moduleLibRef.library.sources)
         }
+
+        moduleLibRef.copy(library = ideaLibrary) -> moduleId
+      } getOrElse (moduleLibRef -> moduleId)
     }
-
-    modifiedModuleLibRefs ++ unmodifiedModuleLibRefs
-
   }
 
   def extractLibraries(report: UpdateReport): Seq[IdeaLibrary] = {
@@ -202,7 +187,7 @@ object SbtIdeaModuleMapping {
       configReport =>
         configReport.modules.map {
           moduleReport =>
-            ideaLibFromModule(moduleReport)
+            ideaLibFromModule(moduleReport, Some(Seq("sources"), Seq("javadoc")))
         }
     }
   }

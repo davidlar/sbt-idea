@@ -11,7 +11,7 @@ import xml.transform.{RewriteRule, RuleTransformer}
 import java.io.{FileOutputStream, File}
 import java.nio.channels.Channels
 import util.control.Exception._
-import xml.{Text, Elem, UnprefixedAttribute, XML, Node}
+import xml.{Text, Elem, UnprefixedAttribute, XML, Node, Unparsed}
 
 object OutputUtil {
   def saveFile(dir: File, filename: String, node: xml.Node) { saveFile(new File(dir, filename), node) }
@@ -123,7 +123,14 @@ class IdeaProjectDescriptor(val projectInfo: IdeaProjectInfo, val env: IdeaProje
         case _ =>
       }
 
-      if (!configFile("vcs.xml").exists) saveFile(configDir, "vcs.xml", project(vcsComponent))
+      Seq(
+        "vcs.xml" -> Some(project(vcsComponent)),
+        "projectCodeStyle.xml" -> Some(defaultProjectCodeStyleXml),
+        "encodings.xml" -> Some(defaultEncodingsXml)
+      ) foreach { 
+        case (fileName, Some(xmlNode)) if (!configFile(fileName).exists) =>  saveFile(configDir, fileName, xmlNode)
+        case _ => 
+      }
 
       val librariesDir = configFile("libraries")
       librariesDir.mkdirs
@@ -137,6 +144,25 @@ class IdeaProjectDescriptor(val projectInfo: IdeaProjectInfo, val env: IdeaProje
     } else log.error("Skipping .idea creation for " + projectInfo.baseDir + " since directory does not exist")
   }
 
+  val defaultProjectCodeStyleXml =
+    <project version="4">
+      <component name="CodeStyleSettingsManager">
+        <option name="PER_PROJECT_SETTINGS">
+          <value>
+            <option name="LINE_SEPARATOR" value={Unparsed("&#10;")} />
+          </value>
+        </option>
+        <option name="USE_PER_PROJECT_SETTINGS" value="true" />
+      </component>
+    </project>
+
+  val defaultEncodingsXml =
+    <project version="4">
+      <component name="Encoding" useUTFGuessing="true" native2AsciiForPropertiesFiles="false" defaultCharsetForPropertiesFiles="ISO-8859-1">
+        <file url="PROJECT" charset="UTF-8" />
+      </component>
+    </project>
+  
   val defaultMiscXml = <project version="4"> {projectRootManagerComponent} </project>
 
   private def miscXml(configDir: File): Option[Node] = try {
